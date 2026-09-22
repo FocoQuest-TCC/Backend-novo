@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const config = {
-    development:{
+    development: {
         client: "postgresql",
         connection: process.env.DATABASE_URL || {
             host: process.env.PG_HOST,
@@ -18,7 +18,9 @@ const config = {
     },
     migrations: {
         directory: "./migrations",
+        stub: "./migrations/.gitkeep",
+        tableName: "knex_migrations"
     }
-}
+};
 
 module.exports = config;
