@@ -1,8 +1,10 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
 const routes = require("./routes");
 const ensureUsersTable = require("./database/ensureSchema");
-require("dotenv").config();
 
 const app = express();
 app.use(cors());
@@ -13,11 +15,13 @@ const port = process.env.PORT ?? 6900;
 
 async function startServer() {
     try {
-        await ensureUsersTable();
-
         if (!process.env.DATABASE_URL && !process.env.PG_HOST) {
-            console.warn("Banco não configurado: crie Backend-TCC-Back/.env com DATABASE_URL ou PG_*.");
+            throw new Error(
+                "Banco não configurado. Crie Backend-novo-back/.env com DATABASE_URL (recomendado para o Neon) ou configure PG_HOST, PG_DATABASE, PG_USER e PG_PASSWORD."
+            );
         }
+
+        await ensureUsersTable();
 
         app.listen(port, () => {
             console.log(`Servidor rodando na porta ${port}`);
