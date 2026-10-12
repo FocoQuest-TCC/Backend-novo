@@ -3,12 +3,11 @@ const cors = require("cors");
 
 const routes = require("./routes");
 const ensureUsersTable = require("./database/ensureSchema");
-const { schema } = require("./database");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
-app.use(routes);
 
 let schemaPromise;
 
@@ -29,6 +28,12 @@ app.use(async (req, res, next) =>{
             error: 'Erro ao incicializar o banco de dados',
         });
     }
+});
+
+app.use(routes);
+
+app.get('/', (req, res) =>{
+    res.json({message: 'API do FocoQuest funcionando!'})
 });
 
 module.exports = app;
