@@ -1,35 +1,34 @@
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
-require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const routes = require("./routes");
 const ensureUsersTable = require("./database/ensureSchema");
+const { schema } = require("./database");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(routes);
 
-const port = process.env.PORT ?? 6900;
+let schemaPromise;
 
-async function startServer() {
+app.use(async (req, res, next) =>{
     try {
-        if (!process.env.DATABASE_URL && !process.env.PG_HOST) {
-            throw new Error(
-                "Banco não configurado. Crie Backend-novo-back/.env com DATABASE_URL (recomendado para o Neon) ou configure PG_HOST, PG_DATABASE, PG_USER e PG_PASSWORD."
-            );
+        if (!schemaPromise) {
+            schemaPromise = ensureUsersTable().catch((error) =>{
+                schemaPromise = null;
+                throw error;
+            });
         }
 
-        await ensureUsersTable();
-
-        app.listen(port, () => {
-            console.log(`Servidor rodando na porta ${port}`);
-        });
+        await schemaPromise;
+        next();
     } catch (error) {
-        console.error("Erro ao iniciar o backend:", error.message);
-        process.exit(1);
+        console.error("Erro ao preparar o banco:", error);
+        res.status(500).json({
+            error: 'Erro ao incicializar o banco de dados',
+        });
     }
-}
+});
 
-startServer();
+module.exports = app;
