@@ -8,7 +8,6 @@ const routes = express.Router();
 routes.post("/login", userControllers.login);
 routes.post("/users", userControllers.createUser);
 routes.post("/auth/google", userControllers.googleAuth);
-routes.post("/verify-email", userControllers.verifyEmail);
 
 routes.use(authenticate);
 routes.get("/guild", guildControllers.getGuild);

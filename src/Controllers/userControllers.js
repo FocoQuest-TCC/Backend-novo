@@ -3,7 +3,6 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const knex = require("../database/index.js");
-const { sendVerificationEmail } = require("../services/emailVerification.js");
 
 const JWT_SECRET = process.env.JWT_SECRET || "focoquest-development-secret";
 const PASSWORD_ROUNDS = 12;
@@ -58,10 +57,6 @@ module.exports = {
 
             if (!user) {
                 return res.status(401).send({ message: "Email ou senha inválidos" });
-            }
-
-            if (user.email_verified === false) {
-                return res.status(403).send({ message: "Confirme seu email pelo link que enviamos antes de entrar." });
             }
 
             let passwordMatches = await bcrypt.compare(password, user.password);
@@ -143,36 +138,6 @@ module.exports = {
         }
     },
 
-    async verifyEmail(req, res) {
-        const token = req.body?.token;
-        if (typeof token !== "string" || !token) {
-            return res.status(400).send({ message: "O link de confirmação é inválido." });
-        }
-
-        const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-        try {
-            const user = await knex("users")
-                .where({ email_verification_token: tokenHash })
-                .where("email_verification_expires_at", ">", new Date())
-                .first();
-
-            if (!user) {
-                return res.status(400).send({ message: "Este link de confirmação é inválido ou expirou." });
-            }
-
-            await knex("users").where("UserID", user.UserID).update({
-                email_verified: true,
-                email_verification_token: null,
-                email_verification_expires_at: null,
-            });
-
-            return res.status(200).send({ message: "Email confirmado! Agora você já pode entrar na sua conta." });
-        } catch (error) {
-            console.error("Erro ao confirmar email:", error.message);
-            return res.status(500).send({ message: "Não foi possível confirmar seu email agora." });
-        }
-    },
-
     //Search
 
     async getAllUsers(req, res){
@@ -220,34 +185,14 @@ module.exports = {
             }
 
             const passwordHash = await bcrypt.hash(password, PASSWORD_ROUNDS);
-            const verificationToken = crypto.randomBytes(32).toString("hex");
-            const verificationTokenHash = crypto.createHash("sha256").update(verificationToken).digest("hex");
-            const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-            const [user] = await knex("users")
-                .insert({
+            await knex("users").insert({
                     name: name.trim(),
                     email,
                     password: passwordHash,
                     app_data: defaultAppData(),
-                    email_verified: false,
-                    email_verification_token: verificationTokenHash,
-                    email_verification_expires_at: expiresAt,
+                    email_verified: true,
                 })
-                .returning(["UserID", "name", "email", "app_data"]);
-
-            try {
-                await sendVerificationEmail({ email, name: name.trim(), token: verificationToken });
-            } catch (mailError) {
-                await knex("users").where("UserID", user.UserID).del();
-                console.error("Erro ao enviar email de confirmação:", mailError.message);
-                return res.status(503).send({
-                    message: "Não foi possível enviar o email de confirmação. Verifique a configuração SMTP no .env do backend e tente novamente.",
-                });
-            }
-
-            return res.status(201).send({
-                message: "Enviamos um link de confirmação para seu email. Confirme o endereço antes de entrar.",
-            });
+            return res.status(201).send({ message: "Conta criada com sucesso." });
         } catch (error) {
             if (error.code === "23505") {
                 return res.status(409).send({ message: "Este email já está cadastrado" });
@@ -259,21 +204,50 @@ module.exports = {
 
     async updateUser(req, res){
         const { id } = req.params;
-        const { name, email, password } = req.body;
-        const info = {};
+        const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+        if (!name || name.length > 120) {
+            return res.status(400).send({ message: "O nome deve ter entre 1 e 120 caracteres." });
+        }
 
-        if (name) info.name = name;
-        if (email) info.email = email.toLowerCase();
-        if (password) info.password = await bcrypt.hash(password, PASSWORD_ROUNDS);
-
-        await knex("users").where("UserID", id).update(info);
-        return res.status(200).send({ message: "User updated successfully" });
+        try {
+            const updatedCount = await knex("users").where("UserID", id).update({ name });
+            if (!updatedCount) return res.status(404).send({ message: "Usuário não encontrado." });
+            const user = await knex("users")
+                .select("UserID", "name", "email")
+                .where("UserID", id)
+                .first();
+            return res.status(200).send({ user: publicUser(user), message: "Nome atualizado com sucesso." });
+        } catch (error) {
+            console.error("Erro ao atualizar usuário:", error.message);
+            return res.status(500).send({ message: "Não foi possível atualizar o nome." });
+        }
     },
 
     async deleteUser(req, res){
-        const {id} = req.params;
-        await knex("users").where("UserID", id).del()
-        return res.status(200).send({ message: "User deleted successfully" });
+        const { id } = req.params;
+        const { password } = req.body || {};
+        if (typeof password !== "string" || !password) {
+            return res.status(400).send({ message: "Informe sua senha para excluir a conta." });
+        }
+
+        try {
+            const user = await knex("users").where("UserID", id).first();
+            if (!user) return res.status(404).send({ message: "Usuário não encontrado." });
+
+            let passwordMatches = await bcrypt.compare(password, user.password);
+            if (!passwordMatches && !user.password.startsWith("$2")) {
+                passwordMatches = user.password === password;
+            }
+            if (!passwordMatches) {
+                return res.status(401).send({ message: "Senha incorreta. A conta não foi excluída." });
+            }
+
+            await knex("users").where("UserID", id).del();
+            return res.status(200).send({ message: "Conta excluída com sucesso." });
+        } catch (error) {
+            console.error("Erro ao excluir usuário:", error.message);
+            return res.status(500).send({ message: "Não foi possível excluir a conta." });
+        }
     },
 
     async getUserData(req, res) {
