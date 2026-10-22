@@ -8,7 +8,9 @@ const ensureUsersTable = require("./database/ensureSchema");
 
 const app = express();
 app.use(cors({
-  origin: 'https://backend-novo-drab.vercel.app'
+  origin: 'https://foco-quest-three.vercel.app',
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','bypass-tunnel-reminder'],
 }));
 app.use(express.json());
 app.get('/health', (req, res) => {
