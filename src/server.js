@@ -7,7 +7,9 @@ const routes = require("./routes");
 const ensureUsersTable = require("./database/ensureSchema");
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: 'https://backend-novo-drab.vercel.app'
+}));
 app.use(express.json());
 app.get('/health', (req, res) => {
   res.status(200).json({
