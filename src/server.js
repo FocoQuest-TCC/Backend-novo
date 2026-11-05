@@ -7,8 +7,16 @@ const routes = require("./routes");
 const ensureUsersTable = require("./database/ensureSchema");
 
 const app = express();
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "https://foco-quest-three.vercel.app",
+    ];
+
 app.use(cors({
-  origin: 'https://foco-quest-three.vercel.app',
+  origin: allowedOrigins,
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization','bypass-tunnel-reminder'],
 }));

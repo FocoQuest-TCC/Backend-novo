@@ -13,6 +13,29 @@ function defaultAppData() {
     };
 }
 
+async function moveGuildExperienceToUsers() {
+    if (!(await knex.schema.hasTable("guild_memberships"))
+        || !(await knex.schema.hasColumn("guild_memberships", "experience"))) {
+        return;
+    }
+
+    await knex.transaction(async (transaction) => {
+        const memberships = await transaction("guild_memberships")
+            .select("user_id", "experience");
+        for (const membership of memberships) {
+            const experience = Number(membership.experience) || 0;
+            if (experience > 0) {
+                await transaction("users")
+                    .where("UserID", membership.user_id)
+                    .increment("experience", experience);
+            }
+        }
+        await transaction.schema.alterTable("guild_memberships", (table) => {
+            table.dropColumn("experience");
+        });
+    });
+}
+
 async function ensureUsersTable() {
     const hasUsersTable = await knex.schema.hasTable("users");
 
@@ -22,6 +45,8 @@ async function ensureUsersTable() {
             table.string("name", 120).notNullable();
             table.string("email", 255).notNullable().unique();
             table.text("password").notNullable();
+            table.string("character_id", 40);
+            table.integer("experience").notNullable().defaultTo(0);
             table.jsonb("app_data").notNullable().defaultTo(JSON.stringify(defaultAppData()));
             table.boolean("email_verified").notNullable().defaultTo(true);
             table.text("email_verification_token");
@@ -29,7 +54,22 @@ async function ensureUsersTable() {
         });
 
         await ensureGuildSchema(knex);
+        await moveGuildExperienceToUsers();
         return;
+    }
+
+    const hasExperienceColumn = await knex.schema.hasColumn("users", "experience");
+    if (!hasExperienceColumn) {
+        await knex.schema.alterTable("users", (table) => {
+            table.integer("experience").notNullable().defaultTo(0);
+        });
+    }
+
+    const hasCharacterColumn = await knex.schema.hasColumn("users", "character_id");
+    if (!hasCharacterColumn) {
+        await knex.schema.alterTable("users", (table) => {
+            table.string("character_id", 40);
+        });
     }
 
     const hasAppDataColumn = await knex.schema.hasColumn("users", "app_data");
@@ -58,6 +98,7 @@ async function ensureUsersTable() {
     }
 
     await ensureGuildSchema(knex);
+    await moveGuildExperienceToUsers();
 }
 
 module.exports = ensureUsersTable;

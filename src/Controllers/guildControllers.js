@@ -1,6 +1,9 @@
 const { randomBytes } = require("crypto");
 const knex = require("../database/index.js");
 
+const BOSS_IDS = ["bluelobister", "cao", "red", "nico"];
+const EXPERIENCE_PER_QUEST = 100;
+
 function databaseError(res, action, error) {
     console.error(`Erro ao ${action}:`, error);
     return res.status(500).send({ message: `Erro ao ${action}` });
@@ -40,18 +43,33 @@ async function requireAdmin(req, res) {
 }
 
 async function guildSnapshot(membership) {
-    const members = await knex("guild_memberships")
+    await knex("guild_boards")
+        .where("guild_id", membership.guildId)
+        .where((query) => query.whereNull("boss_id").orWhere("boss_id", ""))
+        .update({
+            boss_id: knex.raw("CASE WHEN random() < 0.5 THEN 'bluelobister' ELSE 'cao' END"),
+        });
+
+    const membershipRows = await knex("guild_memberships")
         .join("users", "guild_memberships.user_id", "users.UserID")
         .select(
             "guild_memberships.user_id as userId",
             "users.name",
-            "guild_memberships.role"
+            "users.character_id as characterId",
+            "guild_memberships.role",
+            "users.experience",
+            "guild_memberships.contribution_xp as contributionXP"
         )
         .where("guild_memberships.guild_id", membership.guildId)
         .orderBy("users.name");
+    const members = membershipRows.map((member) => ({
+        ...member,
+        experience: Number(member.experience) || 0,
+        contributionXP: Number(member.contributionXP) || 0,
+    }));
 
     const boards = await knex("guild_boards")
-        .select("id", "name")
+        .select("id", "name", "boss_id as bossId", "closed_at as closedAt")
         .where("guild_id", membership.guildId)
         .orderBy("id");
 
@@ -61,7 +79,8 @@ async function guildSnapshot(membership) {
             "guild_tasks.id",
             "guild_tasks.board_id as boardId",
             "guild_tasks.text",
-            "guild_tasks.column"
+            "guild_tasks.column",
+            "guild_tasks.boss_damage as bossDamage"
         )
         .where("guild_boards.guild_id", membership.guildId)
         .orderBy("guild_tasks.id");
@@ -73,7 +92,8 @@ async function guildSnapshot(membership) {
                 "guild_task_assignees.task_id as taskId",
                 "guild_task_assignees.user_id as userId",
                 "guild_task_assignees.completed",
-                "users.name"
+                "users.name",
+                "users.character_id as characterId"
             )
             .whereIn("guild_task_assignees.task_id", tasks.map((task) => task.id))
             .orderBy("users.name")
@@ -82,7 +102,12 @@ async function guildSnapshot(membership) {
     const tasksWithAssignees = tasks.map((task) => {
         const taskAssignees = assignees
             .filter((assignee) => assignee.taskId === task.id)
-            .map(({ userId, name, completed }) => ({ userId, name, completed }));
+            .map(({ userId, name, characterId, completed }) => ({
+                userId,
+                name,
+                characterId,
+                completed,
+            }));
         const allCompleted = taskAssignees.length > 0
             && taskAssignees.every((assignee) => assignee.completed);
 
@@ -93,12 +118,23 @@ async function guildSnapshot(membership) {
         };
     });
 
+    const boardsWithBossHealth = boards.map((board) => {
+        const boardTasks = tasksWithAssignees.filter((task) => task.boardId === board.id);
+        return {
+            ...board,
+            bossMaxHealth: boardTasks.reduce((total, task) => total + Number(task.bossDamage), 0),
+            bossHealth: boardTasks
+                .filter((task) => task.column !== "done")
+                .reduce((total, task) => total + Number(task.bossDamage), 0),
+        };
+    });
+
     return {
         id: membership.guildId,
         name: membership.name,
         code: membership.code,
         members,
-        boards,
+        boards: boardsWithBossHealth,
         tasks: tasksWithAssignees,
     };
 }
@@ -305,10 +341,98 @@ module.exports = {
         try {
             const membership = await requireAdmin(req, res);
             if (!membership) return;
-            await knex("guild_boards").insert({ guild_id: membership.guildId, name });
+            const bossId = BOSS_IDS[Math.floor(Math.random() * BOSS_IDS.length)];
+            await knex("guild_boards").insert({ guild_id: membership.guildId, name, boss_id: bossId });
             return res.status(201).send({ guild: await guildSnapshot(membership) });
         } catch (error) {
             return databaseError(res, "criar o quadro", error);
+        }
+    },
+
+    async finishBoard(req, res) {
+        const boardId = Number(req.params.boardId);
+        if (!Number.isSafeInteger(boardId) || boardId <= 0) {
+            return res.status(400).send({ message: "Quadro inválido" });
+        }
+
+        try {
+            const membership = await requireAdmin(req, res);
+            if (!membership) return;
+
+            const result = await knex.transaction(async (transaction) => {
+                const board = await transaction("guild_boards")
+                    .where({ id: boardId, guild_id: membership.guildId })
+                    .forUpdate()
+                    .first();
+                if (!board) return { status: "missing" };
+                if (board.closed_at) return { status: "closed" };
+
+                const tasks = await transaction("guild_tasks")
+                    .select("id")
+                    .where({ board_id: boardId });
+                if (!tasks.length) return { status: "empty" };
+
+                const assignees = await transaction("guild_task_assignees")
+                    .select("task_id", "user_id", "completed")
+                    .whereIn("task_id", tasks.map((task) => task.id));
+                const assignmentsByTask = new Map();
+                for (const assignee of assignees) {
+                    const taskAssignments = assignmentsByTask.get(assignee.task_id) || [];
+                    taskAssignments.push(assignee);
+                    assignmentsByTask.set(assignee.task_id, taskAssignments);
+                }
+
+                if (tasks.some((task) => {
+                    const taskAssignments = assignmentsByTask.get(task.id) || [];
+                    return !taskAssignments.length || taskAssignments.some((assignee) => !assignee.completed);
+                })) {
+                    return { status: "incomplete" };
+                }
+
+                const questCounts = new Map();
+                for (const assignee of assignees) {
+                    questCounts.set(
+                        assignee.user_id,
+                        (questCounts.get(assignee.user_id) || 0) + 1,
+                    );
+                }
+                for (const [userId, completedQuestCount] of questCounts) {
+                    await transaction("users")
+                        .where({ UserID: userId })
+                        .increment("experience", completedQuestCount * EXPERIENCE_PER_QUEST);
+                    await transaction("guild_memberships")
+                        .where({ guild_id: membership.guildId, user_id: userId })
+                        .increment("contribution_xp", completedQuestCount * EXPERIENCE_PER_QUEST);
+                }
+
+                await transaction("guild_boards")
+                    .where({ id: boardId })
+                    .update({ closed_at: transaction.fn.now() });
+                return {
+                    status: "finished",
+                    questCount: tasks.length,
+                    totalExperience: [...questCounts.values()].reduce(
+                        (total, count) => total + count * EXPERIENCE_PER_QUEST,
+                        0,
+                    ),
+                };
+            });
+
+            if (result.status === "missing") return res.status(404).send({ message: "Quadro não encontrado" });
+            if (result.status === "closed") return res.status(409).send({ message: "Esse quadro já foi finalizado" });
+            if (result.status === "empty") {
+                return res.status(409).send({ message: "Adicione ao menos uma quest antes de finalizar o quadro" });
+            }
+            if (result.status === "incomplete") {
+                return res.status(409).send({ message: "Conclua todas as quests antes de finalizar o quadro" });
+            }
+
+            return res.status(200).send({
+                guild: await guildSnapshot(membership),
+                message: `Boss derrotado! ${result.totalExperience} XP distribuídos por ${result.questCount} quests.`,
+            });
+        } catch (error) {
+            return databaseError(res, "finalizar o quadro", error);
         }
     },
 
@@ -346,11 +470,6 @@ module.exports = {
             const membership = await requireAdmin(req, res);
             if (!membership) return;
 
-            const board = await knex("guild_boards")
-                .where({ id: boardId, guild_id: membership.guildId })
-                .first();
-            if (!board) return res.status(404).send({ message: "Quadro não encontrado" });
-
             const validMembers = await knex("guild_memberships")
                 .where({ guild_id: membership.guildId })
                 .whereIn("user_id", uniqueAssigneeIds)
@@ -360,16 +479,30 @@ module.exports = {
                 return res.status(400).send({ message: "Todas as pessoas atribuídas devem pertencer à guilda" });
             }
 
-            await knex.transaction(async (transaction) => {
+            const result = await knex.transaction(async (transaction) => {
+                const board = await transaction("guild_boards")
+                    .where({ id: boardId, guild_id: membership.guildId })
+                    .forUpdate()
+                    .first();
+                if (!board) return "missing";
+                if (board.closed_at) return "closed";
+
                 const [task] = await transaction("guild_tasks")
-                    .insert({ board_id: board.id, text })
+                    .insert({
+                        board_id: board.id,
+                        text,
+                        boss_damage: Math.floor(Math.random() * 800000001) + 200000000,
+                    })
                     .returning("id");
                 const taskId = typeof task === "object" ? task.id : task;
                 await transaction("guild_task_assignees").insert(
                     uniqueAssigneeIds.map((userId) => ({ task_id: taskId, user_id: userId }))
                 );
+                return "created";
             });
 
+            if (result === "missing") return res.status(404).send({ message: "Quadro não encontrado" });
+            if (result === "closed") return res.status(409).send({ message: "Não é possível adicionar quests a um quadro finalizado" });
             return res.status(201).send({ guild: await guildSnapshot(membership) });
         } catch (error) {
             return databaseError(res, "criar a tarefa", error);
@@ -388,26 +521,42 @@ module.exports = {
         try {
             const membership = await requireMembership(req, res);
             if (!membership) return;
-            const assignment = await knex("guild_task_assignees")
-                .join("guild_tasks", "guild_task_assignees.task_id", "guild_tasks.id")
+            const result = await knex.transaction(async (transaction) => {
+                const task = await transaction("guild_tasks")
                 .join("guild_boards", "guild_tasks.board_id", "guild_boards.id")
                 .where({
-                    "guild_task_assignees.task_id": taskId,
-                    "guild_task_assignees.user_id": Number(req.auth.userId),
+                    "guild_tasks.id": taskId,
                     "guild_boards.guild_id": membership.guildId,
                 })
-                .select("guild_task_assignees.id")
+                .select("guild_boards.id as boardId")
                 .first();
-            if (!assignment) {
-                return res.status(403).send({ message: "Você não está atribuído a essa tarefa" });
-            }
+                if (!task) return "missing";
 
-            await knex("guild_task_assignees")
-                .where({ id: assignment.id })
+                const board = await transaction("guild_boards")
+                    .where({ id: task.boardId })
+                    .forUpdate()
+                    .first();
+                if (board.closed_at) return "closed";
+
+                const assignment = await transaction("guild_task_assignees")
+                    .where({ task_id: taskId, user_id: Number(req.auth.userId) })
+                    .first();
+                if (!assignment) return "unassigned";
+
+                await transaction("guild_task_assignees")
+                    .where({ id: assignment.id })
                 .update({
                     completed: req.body.completed,
                     completed_at: req.body.completed ? knex.fn.now() : null,
                 });
+                return "updated";
+            });
+
+            if (result === "missing") return res.status(404).send({ message: "Tarefa não encontrada" });
+            if (result === "closed") return res.status(409).send({ message: "Esse quadro já foi finalizado" });
+            if (result === "unassigned") {
+                return res.status(403).send({ message: "Você não está atribuído a essa tarefa" });
+            }
             return res.status(200).send({ guild: await guildSnapshot(membership) });
         } catch (error) {
             return databaseError(res, "atualizar a conclusão da tarefa", error);
@@ -427,16 +576,26 @@ module.exports = {
         try {
             const membership = await requireAdmin(req, res);
             if (!membership) return;
-            const task = await knex("guild_tasks")
+            const result = await knex.transaction(async (transaction) => {
+                const task = await transaction("guild_tasks")
                 .join("guild_boards", "guild_tasks.board_id", "guild_boards.id")
                 .where({
                     "guild_tasks.id": taskId,
                     "guild_boards.guild_id": membership.guildId,
                 })
-                .select("guild_tasks.id")
+                .select("guild_boards.id as boardId")
                 .first();
-            if (!task) return res.status(404).send({ message: "Tarefa não encontrada" });
-            await knex("guild_tasks").where({ id: taskId }).update({ column });
+                if (!task) return "missing";
+                const board = await transaction("guild_boards")
+                    .where({ id: task.boardId })
+                    .forUpdate()
+                    .first();
+                if (board.closed_at) return "closed";
+                await transaction("guild_tasks").where({ id: taskId }).update({ column });
+                return "moved";
+            });
+            if (result === "missing") return res.status(404).send({ message: "Tarefa não encontrada" });
+            if (result === "closed") return res.status(409).send({ message: "Esse quadro já foi finalizado" });
             return res.status(200).send({ guild: await guildSnapshot(membership) });
         } catch (error) {
             return databaseError(res, "mover a tarefa", error);
@@ -452,16 +611,28 @@ module.exports = {
         try {
             const membership = await requireAdmin(req, res);
             if (!membership) return;
-            const task = await knex("guild_tasks")
+            const result = await knex.transaction(async (transaction) => {
+                const task = await transaction("guild_tasks")
                 .join("guild_boards", "guild_tasks.board_id", "guild_boards.id")
                 .where({
                     "guild_tasks.id": taskId,
                     "guild_boards.guild_id": membership.guildId,
                 })
-                .select("guild_tasks.id")
+                .select("guild_boards.id as boardId")
                 .first();
-            if (!task) return res.status(404).send({ message: "Tarefa não encontrada" });
-            await knex("guild_tasks").where({ id: taskId }).del();
+                if (!task) return "missing";
+                const board = await transaction("guild_boards")
+                    .where({ id: task.boardId })
+                    .forUpdate()
+                    .first();
+                if (board.closed_at) return "closed";
+                await transaction("guild_tasks").where({ id: taskId }).del();
+                return "deleted";
+            });
+            if (result === "missing") return res.status(404).send({ message: "Tarefa não encontrada" });
+            if (result === "closed") {
+                return res.status(409).send({ message: "Não é possível excluir quests de um quadro finalizado" });
+            }
             return res.status(200).send({ guild: await guildSnapshot(membership) });
         } catch (error) {
             return databaseError(res, "excluir a tarefa", error);

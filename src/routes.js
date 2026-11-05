@@ -16,6 +16,7 @@ routes.post("/guild/join", guildControllers.joinGuild);
 routes.patch("/guild/members/:userId/role", guildControllers.updateMemberRole);
 routes.delete("/guild/members/:userId", guildControllers.removeMember);
 routes.post("/guild/boards", guildControllers.createBoard);
+routes.post("/guild/boards/:boardId/finish", guildControllers.finishBoard);
 routes.delete("/guild/boards/:boardId", guildControllers.deleteBoard);
 routes.post("/guild/boards/:boardId/tasks", guildControllers.createTask);
 routes.patch("/guild/tasks/:taskId/completion", guildControllers.setTaskCompletion);
@@ -24,8 +25,10 @@ routes.delete("/guild/tasks/:taskId", guildControllers.deleteTask);
 routes.get("/users", userControllers.getAllUsers);
 routes.get("/users/:id", userControllers.getUserById);
 routes.put("/users/:id", sameUser, userControllers.updateUser);
+routes.patch("/users/:id/character", sameUser, userControllers.updateCharacter);
 routes.delete("/users/:id", sameUser, userControllers.deleteUser);
 routes.get("/users/:id/data", sameUser, userControllers.getUserData);
+routes.patch("/users/:id/data", sameUser, userControllers.updateUserData);
 routes.put("/users/:id/data", sameUser, userControllers.updateUserData);
 
 module.exports = routes;

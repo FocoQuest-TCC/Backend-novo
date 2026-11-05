@@ -7,6 +7,7 @@ const knex = require("../database/index.js");
 const JWT_SECRET = process.env.JWT_SECRET || "focoquest-development-secret";
 const PASSWORD_ROUNDS = 12;
 const googleClient = new OAuth2Client();
+const VALID_CHARACTER_IDS = new Set(["quemEele", "gatoretardado", "gatomaneiro", "gatolele"]);
 
 function normalizeEmail(email) {
     return typeof email === "string" ? email.trim().toLowerCase() : "";
@@ -21,9 +22,13 @@ function publicUser(user) {
         password: _password,
         email_verification_token: _verificationToken,
         email_verification_expires_at: _verificationExpiry,
+        character_id: characterId,
         ...safeUser
     } = user;
-    return safeUser;
+    return {
+        ...safeUser,
+        ...(characterId !== undefined ? { characterId } : {}),
+    };
 }
 
 function createToken(user) {
@@ -152,7 +157,15 @@ module.exports = {
     async getUserById(req, res){
         const { id } = req.params
         try {
-            const result = await knex("users").select("UserID", "name", "email").where("UserID", id)
+            const result = await knex("users")
+                .select(
+                    "UserID",
+                    "name",
+                    "email",
+                    "experience",
+                    "character_id as characterId",
+                )
+                .where("UserID", id)
             return res.status(200).send(result)
         } catch (error) {
             return res.status(500).send({ error: error.message })
@@ -185,14 +198,19 @@ module.exports = {
             }
 
             const passwordHash = await bcrypt.hash(password, PASSWORD_ROUNDS);
-            await knex("users").insert({
+            const [user] = await knex("users").insert({
                     name: name.trim(),
                     email,
                     password: passwordHash,
                     app_data: defaultAppData(),
                     email_verified: true,
                 })
-            return res.status(201).send({ message: "Conta criada com sucesso." });
+                .returning("*");
+            return res.status(201).send({
+                message: "Conta criada com sucesso.",
+                token: createToken(user),
+                user: publicUser(user),
+            });
         } catch (error) {
             if (error.code === "23505") {
                 return res.status(409).send({ message: "Este email já está cadastrado" });
@@ -220,6 +238,33 @@ module.exports = {
         } catch (error) {
             console.error("Erro ao atualizar usuário:", error.message);
             return res.status(500).send({ message: "Não foi possível atualizar o nome." });
+        }
+    },
+
+    async updateCharacter(req, res) {
+        const { id } = req.params;
+        const characterId = req.body?.characterId;
+        if (typeof characterId !== "string" || !VALID_CHARACTER_IDS.has(characterId)) {
+            return res.status(400).send({ message: "Selecione um personagem válido." });
+        }
+
+        try {
+            const updatedCount = await knex("users")
+                .where("UserID", id)
+                .update({ character_id: characterId });
+            if (!updatedCount) return res.status(404).send({ message: "Usuário não encontrado." });
+
+            const user = await knex("users")
+                .select("UserID", "name", "email", "character_id as characterId")
+                .where("UserID", id)
+                .first();
+            return res.status(200).send({
+                user: publicUser(user),
+                message: "Personagem salvo com sucesso.",
+            });
+        } catch (error) {
+            console.error("Erro ao atualizar personagem:", error.message);
+            return res.status(500).send({ message: "Não foi possível salvar o personagem." });
         }
     },
 
@@ -262,7 +307,32 @@ module.exports = {
             return res.status(400).send({ message: "Os dados do usuário são inválidos" });
         }
 
-        await knex("users").where("UserID", req.params.id).update({ app_data: data });
-        return res.status(200).send({ data });
+        if (data.pomodoroDurations !== undefined) {
+            const durations = data.pomodoroDurations;
+            const validDurations = durations
+                && ["focus", "shortBreak", "longBreak"].every((key) => (
+                    Number.isInteger(durations[key])
+                    && durations[key] >= 1
+                    && durations[key] <= 180
+                ));
+            if (!validDurations) {
+                return res.status(400).send({
+                    message: "Os tempos do Pomodoro devem ser números inteiros entre 1 e 180 minutos.",
+                });
+            }
+        }
+
+        try {
+            const updatedCount = await knex("users")
+                .where("UserID", req.params.id)
+                .update({
+                    app_data: knex.raw("COALESCE(app_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(data)]),
+                });
+            if (!updatedCount) return res.status(404).send({ message: "Usuário não encontrado." });
+            return res.status(200).send({ data });
+        } catch (error) {
+            console.error("Erro ao atualizar dados do usuário:", error.message);
+            return res.status(500).send({ message: "Não foi possível salvar os dados do usuário." });
+        }
     }
 }
