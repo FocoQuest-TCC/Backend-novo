@@ -40,13 +40,6 @@ async function ensureGuildSchema(knex) {
             await knex("guild_memberships").update({
                 contribution_xp: knex.raw("COALESCE(experience, 0)"),
             });
-        } else {
-            const userExperience = knex("users")
-                .select("experience")
-                .whereRaw("?? = ??", ["users.UserID", "guild_memberships.user_id"]);
-            await knex("guild_memberships").update({
-                contribution_xp: knex.raw("COALESCE((?), 0)", [userExperience]),
-            });
         }
     }
 
@@ -103,7 +96,7 @@ async function ensureGuildSchema(knex) {
 
     const taskHasBossDamage = await knex.schema.hasColumn("guild_tasks", "boss_damage");
     if (!taskHasBossDamage) {
-        await knex.schema.alterTable("guild_tasks", (table) => {
+        await knex.schema.alterTable("guild_tasks", table => {
             table.integer("boss_damage").notNullable().defaultTo(0);
         });
     }

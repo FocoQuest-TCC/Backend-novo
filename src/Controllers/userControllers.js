@@ -4,7 +4,11 @@ const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const knex = require("../database/index.js");
 
-const JWT_SECRET = process.env.JWT_SECRET || "focoquest-development-secret";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, "utf8") < 32) {
+    throw new Error("JWT_SECRET inválida ou ausente.");
+}
+
 const PASSWORD_ROUNDS = 12;
 const googleClient = new OAuth2Client();
 const VALID_CHARACTER_IDS = new Set(["quemEele", "gatoretardado", "gatomaneiro", "gatolele"]);
@@ -32,7 +36,7 @@ function publicUser(user) {
 }
 
 function createToken(user) {
-    return jwt.sign({ userId: String(user.UserID) }, JWT_SECRET, { expiresIn: "7d" });
+    return jwt.sign({ userId: String(user.UserID) }, JWT_SECRET, { algorithm: "HS256", expiresIn: "7d", });
 }
 
 function defaultAppData() {
@@ -50,11 +54,11 @@ function defaultAppData() {
 module.exports = {
 
     async login(req, res){
-        const { password } = req.body;
-        const email = normalizeEmail(req.body.email);
+        const { password } = req.body || {};
+        const email = normalizeEmail(req.body?.email);
 
-        if (!email || !password) {
-            return res.status(400).send({ message: "Email e senha são obrigatórios" });
+        if (!isValidEmail(email) || typeof password !== "string" || password.length === 0) {
+            return res.status(400).json({ message: "Informe email e senha válidos." });
         }
 
         try {
@@ -284,7 +288,7 @@ module.exports = {
                 passwordMatches = user.password === password;
             }
             if (!passwordMatches) {
-                return res.status(401).send({ message: "Senha incorreta. A conta não foi excluída." });
+                return res.status(403).send({ message: "Senha incorreta. A conta não foi excluída." });
             }
 
             await knex("users").where("UserID", id).del();
