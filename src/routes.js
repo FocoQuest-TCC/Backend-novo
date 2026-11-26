@@ -25,6 +25,7 @@ routes.delete("/guild/tasks/:taskId", guildControllers.deleteTask);
 routes.get("/users/:id", sameUser, userControllers.getUserById);
 routes.put("/users/:id", sameUser, userControllers.updateUser);
 routes.patch("/users/:id/character", sameUser, userControllers.updateCharacter);
+routes.patch("/users/:id/experience", sameUser, userControllers.adjustExperience);
 routes.delete("/users/:id", sameUser, userControllers.deleteUser);
 routes.get("/users/:id/data", sameUser, userControllers.getUserData);
 routes.patch("/users/:id/data", sameUser, userControllers.updateUserData);

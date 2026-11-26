@@ -16,7 +16,7 @@ exports.up = async function up(knex) {
                 tasks: [],
                 habits: [],
                 boards: [],
-                kanbanTasks: [],
+                kanbanTasks: [], 
                 inventory: [],
                 gold: 0,
                 gems: 0,

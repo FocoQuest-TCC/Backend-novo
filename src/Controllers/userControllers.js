@@ -11,7 +11,27 @@ if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, "utf8") < 32) {
 
 const PASSWORD_ROUNDS = 12;
 const googleClient = new OAuth2Client();
-const VALID_CHARACTER_IDS = new Set(["quemEele", "gatoretardado", "gatomaneiro", "gatolele"]);
+const VALID_CHARACTER_IDS = new Set([
+    "homemBranco",
+    "homemPreto",
+    "mulherPreta",
+    "mulherBranca",
+    "feiticera",
+    "illaoi",
+    "jonnhy",
+    "kira",
+    "lVerde",
+    "maki",
+    "manhunt",
+    "saci",
+    "simon",
+    "thragg",
+    "uzui",
+    "quemEele",
+    "gatoretardado",
+    "gatomaneiro",
+    "gatolele",
+]);
 
 function normalizeEmail(email) {
     return typeof email === "string" ? email.trim().toLowerCase() : "";
@@ -269,6 +289,27 @@ module.exports = {
         } catch (error) {
             console.error("Erro ao atualizar personagem:", error.message);
             return res.status(500).send({ message: "Não foi possível salvar o personagem." });
+        }
+    },
+
+    async adjustExperience(req, res) {
+        const amount = req.body?.amount;
+        if (!Number.isSafeInteger(amount) || amount === 0) {
+            return res.status(400).send({ message: "A quantidade de experiência é inválida." });
+        }
+
+        try {
+            const [user] = await knex("users")
+                .where("UserID", req.params.id)
+                .update({
+                    experience: knex.raw("GREATEST(0, COALESCE(experience, 0) + ?)", [amount]),
+                })
+                .returning(["UserID", "experience"]);
+            if (!user) return res.status(404).send({ message: "Usuário não encontrado." });
+            return res.status(200).send({ experience: Number(user.experience) || 0 });
+        } catch (error) {
+            console.error("Erro ao atualizar experiência:", error.message);
+            return res.status(500).send({ message: "Não foi possível atualizar a experiência." });
         }
     },
 

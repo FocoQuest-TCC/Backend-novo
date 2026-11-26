@@ -1,8 +1,8 @@
 const { randomBytes } = require("crypto");
 const knex = require("../database/index.js");
 
-const BOSS_IDS = ["bluelobister", "cao", "red", "nico"];
-const EXPERIENCE_PER_QUEST = 100;
+const BOSS_IDS = ["monstroAreia", "tempoPerdido"];
+const EXPERIENCE_PER_QUEST = 225;
 
 function databaseError(res, action, error) {
     console.error(`Erro ao ${action}:`, error);
@@ -42,12 +42,14 @@ async function requireAdmin(req, res) {
     return membership;
 }
 
-async function guildSnapshot(membership) {
+async function guildSnapshot(membership, debugDate) {
+    await applyOverdueTaskPenalties(membership.guildId, debugDate);
+
     await knex("guild_boards")
         .where("guild_id", membership.guildId)
         .where((query) => query.whereNull("boss_id").orWhere("boss_id", ""))
         .update({
-            boss_id: knex.raw("CASE WHEN random() < 0.5 THEN 'bluelobister' ELSE 'cao' END"),
+            boss_id: knex.raw("CASE WHEN random() < 0.5 THEN 'monstroAreia' ELSE 'tempoPerdido' END"),
         });
 
     const membershipRows = await knex("guild_memberships")
@@ -80,7 +82,8 @@ async function guildSnapshot(membership) {
             "guild_tasks.board_id as boardId",
             "guild_tasks.text",
             "guild_tasks.column",
-            "guild_tasks.boss_damage as bossDamage"
+            "guild_tasks.boss_damage as bossDamage",
+            "guild_tasks.due_date as dueDate"
         )
         .where("guild_boards.guild_id", membership.guildId)
         .orderBy("guild_tasks.id");
@@ -139,6 +142,101 @@ async function guildSnapshot(membership) {
     };
 }
 
+function xpForNextLevel(experience) {
+    let remaining = Math.max(0, Number(experience) || 0);
+    let level = 1;
+    let required = 75;
+    while (remaining >= required) {
+        remaining -= required;
+        level += 1;
+        required = Math.floor(75 * level);
+    }
+    return required;
+}
+
+function daysBetween(start, end) {
+    const startDate = start instanceof Date ? start.toISOString().slice(0, 10) : start;
+    return Math.floor((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000);
+}
+
+function todayInBrazil() {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Sao_Paulo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(new Date());
+    const date = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+    return `${date.year}-${date.month}-${date.day}`;
+}
+
+function isValidISODate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+async function applyOverdueTaskPenalties(guildId, debugDate) {
+    const today = isValidISODate(debugDate) ? debugDate : todayInBrazil();
+    await knex.transaction(async (transaction) => {
+        const tasks = await transaction("guild_tasks")
+            .join("guild_boards", "guild_tasks.board_id", "guild_boards.id")
+            .select(
+                "guild_tasks.id",
+                "guild_tasks.due_date as dueDate",
+                "guild_tasks.penalty_days_applied as penaltyDaysApplied",
+            )
+            .where("guild_boards.guild_id", guildId)
+            .whereNull("guild_boards.closed_at")
+            .whereNotNull("guild_tasks.due_date")
+            .where("guild_tasks.due_date", "<", today)
+            .forUpdate("guild_tasks");
+
+        for (const task of tasks) {
+            const overdueDays = Math.max(0, daysBetween(task.dueDate, today));
+            const appliedDays = Number(task.penaltyDaysApplied) || 0;
+            if (overdueDays <= appliedDays) continue;
+
+            const assignments = await transaction("guild_task_assignees")
+                .select("user_id as userId", "completed")
+                .where({ task_id: task.id });
+            if (assignments.length > 0 && assignments.every((assignment) => assignment.completed)) continue;
+
+            const assignmentsByUserId = new Map(
+                assignments.map((assignment) => [Number(assignment.userId), assignment])
+            );
+            const guildMembers = await transaction("guild_memberships")
+                .join("users", "guild_memberships.user_id", "users.UserID")
+                .select(
+                    "guild_memberships.user_id as userId",
+                    "users.experience",
+                )
+                .where("guild_memberships.guild_id", guildId);
+
+            for (const member of guildMembers) {
+                const assignment = assignmentsByUserId.get(Number(member.userId));
+                if (assignment?.completed) continue;
+                let experience = Number(member.experience) || 0;
+                for (let day = appliedDays + 1; day <= overdueDays; day += 1) {
+                    const percentage = assignment
+                        ? (day === 1 ? 0.5 : 0.1)
+                        : 0.05;
+                    const penalty = Math.floor(xpForNextLevel(experience) * percentage);
+                    if (penalty > 0) {
+                        experience = Math.max(0, experience - penalty);
+                        await transaction("users")
+                            .where("UserID", member.userId)
+                            .update({ experience });
+                    }
+                }
+            }
+            await transaction("guild_tasks")
+                .where({ id: task.id })
+                .update({ penalty_days_applied: overdueDays });
+        }
+    });
+}
+
 function normalizeName(value, maxLength) {
     return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
@@ -148,7 +246,7 @@ module.exports = {
         try {
             const membership = await getMembership(Number(req.auth.userId));
             if (!membership) return res.status(200).send({ guild: null });
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "carregar a guilda", error);
         }
@@ -187,7 +285,7 @@ module.exports = {
                     guildId: guild.id,
                     name: guild.name,
                     code: guild.code,
-                }),
+                }, req.query.debugDate),
             });
         } catch (error) {
             if (error.code === "23505") {
@@ -222,7 +320,7 @@ module.exports = {
                     guildId: guild.id,
                     name: guild.name,
                     code: guild.code,
-                }),
+                }, req.query.debugDate),
             });
         } catch (error) {
             if (error.code === "23505") {
@@ -272,7 +370,7 @@ module.exports = {
             if (result === "last-admin") {
                 return res.status(409).send({ message: "A guilda precisa ter pelo menos um administrador" });
             }
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "alterar a permissão do membro", error);
         }
@@ -326,7 +424,7 @@ module.exports = {
                 return res.status(200).send({ guild: null, message: "Você saiu da guilda" });
             }
             return res.status(200).send({
-                guild: await guildSnapshot(membership),
+                guild: await guildSnapshot(membership, req.query.debugDate),
                 message: "Membro removido da guilda",
             });
         } catch (error) {
@@ -343,7 +441,7 @@ module.exports = {
             if (!membership) return;
             const bossId = BOSS_IDS[Math.floor(Math.random() * BOSS_IDS.length)];
             await knex("guild_boards").insert({ guild_id: membership.guildId, name, boss_id: bossId });
-            return res.status(201).send({ guild: await guildSnapshot(membership) });
+            return res.status(201).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "criar o quadro", error);
         }
@@ -428,7 +526,7 @@ module.exports = {
             }
 
             return res.status(200).send({
-                guild: await guildSnapshot(membership),
+                guild: await guildSnapshot(membership, req.query.debugDate),
                 message: `Boss derrotado! ${result.totalExperience} XP distribuídos por ${result.questCount} quests.`,
             });
         } catch (error) {
@@ -449,7 +547,7 @@ module.exports = {
                 .where({ id: boardId, guild_id: membership.guildId })
                 .del();
             if (!deleted) return res.status(404).send({ message: "Quadro não encontrado" });
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "excluir o quadro", error);
         }
@@ -457,12 +555,22 @@ module.exports = {
 
     async createTask(req, res) {
         const text = normalizeName(req.body?.text, 240);
+        const dueDate = typeof req.body?.dueDate === "string" ? req.body.dueDate : "";
+        const parsedDueDate = /^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+            ? new Date(`${dueDate}T00:00:00Z`)
+            : null;
         const boardId = Number(req.params.boardId);
         const assigneeIds = req.body?.assigneeIds;
-        if (!Number.isSafeInteger(boardId) || boardId <= 0 || !text
-            || !Array.isArray(assigneeIds) || assigneeIds.length === 0
+        if (!Number.isSafeInteger(boardId) || boardId <= 0 || !text) {
+            return res.status(400).send({ message: "Informe um título válido para a tarefa" });
+        }
+        if (!parsedDueDate || Number.isNaN(parsedDueDate.getTime())
+            || parsedDueDate.toISOString().slice(0, 10) !== dueDate) {
+            return res.status(400).send({ message: "Informe um prazo válido para a tarefa" });
+        }
+        if (!Array.isArray(assigneeIds) || assigneeIds.length === 0
             || assigneeIds.some((id) => !Number.isSafeInteger(Number(id)))) {
-            return res.status(400).send({ message: "Informe o título e pelo menos um membro responsável" });
+            return res.status(400).send({ message: "Selecione pelo menos um membro responsável pela tarefa" });
         }
 
         const uniqueAssigneeIds = [...new Set(assigneeIds.map(Number))];
@@ -491,6 +599,7 @@ module.exports = {
                     .insert({
                         board_id: board.id,
                         text,
+                        due_date: dueDate,
                         boss_damage: Math.floor(Math.random() * 800000001) + 200000000,
                     })
                     .returning("id");
@@ -503,7 +612,7 @@ module.exports = {
 
             if (result === "missing") return res.status(404).send({ message: "Quadro não encontrado" });
             if (result === "closed") return res.status(409).send({ message: "Não é possível adicionar quests a um quadro finalizado" });
-            return res.status(201).send({ guild: await guildSnapshot(membership) });
+            return res.status(201).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "criar a tarefa", error);
         }
@@ -521,6 +630,7 @@ module.exports = {
         try {
             const membership = await requireMembership(req, res);
             if (!membership) return;
+            await applyOverdueTaskPenalties(membership.guildId, req.query.debugDate);
             const result = await knex.transaction(async (transaction) => {
                 const task = await transaction("guild_tasks")
                 .join("guild_boards", "guild_tasks.board_id", "guild_boards.id")
@@ -557,7 +667,7 @@ module.exports = {
             if (result === "unassigned") {
                 return res.status(403).send({ message: "Você não está atribuído a essa tarefa" });
             }
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "atualizar a conclusão da tarefa", error);
         }
@@ -596,7 +706,7 @@ module.exports = {
             });
             if (result === "missing") return res.status(404).send({ message: "Tarefa não encontrada" });
             if (result === "closed") return res.status(409).send({ message: "Esse quadro já foi finalizado" });
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "mover a tarefa", error);
         }
@@ -633,7 +743,7 @@ module.exports = {
             if (result === "closed") {
                 return res.status(409).send({ message: "Não é possível excluir quests de um quadro finalizado" });
             }
-            return res.status(200).send({ guild: await guildSnapshot(membership) });
+            return res.status(200).send({ guild: await guildSnapshot(membership, req.query.debugDate) });
         } catch (error) {
             return databaseError(res, "excluir a tarefa", error);
         }

@@ -49,7 +49,7 @@ async function ensureGuildSchema(knex) {
             table.integer("guild_id").notNullable()
                 .references("id").inTable("guilds").onDelete("CASCADE");
             table.string("name", 100).notNullable();
-            table.string("boss_id", 40).notNullable().defaultTo("cao");
+            table.string("boss_id", 40).notNullable().defaultTo("monstroAreia");
             table.timestamp("closed_at").nullable();
             table.timestamp("created_at").notNullable().defaultTo(knex.fn.now());
         });
@@ -63,6 +63,8 @@ async function ensureGuildSchema(knex) {
             table.string("text", 240).notNullable();
             table.enu("column", ["todo", "doing"]).notNullable().defaultTo("todo");
             table.integer("boss_damage").notNullable().defaultTo(0);
+            table.date("due_date").notNullable();
+            table.integer("penalty_days_applied").notNullable().defaultTo(0);
             table.timestamp("created_at").notNullable().defaultTo(knex.fn.now());
         });
     }
@@ -84,20 +86,24 @@ async function ensureGuildSchema(knex) {
     const boardHasClosedAt = await knex.schema.hasColumn("guild_boards", "closed_at");
     if (!boardHasBossId || !boardHasClosedAt) {
         await knex.schema.alterTable("guild_boards", (table) => {
-            if (!boardHasBossId) table.string("boss_id", 40).notNullable().defaultTo("cao");
+            if (!boardHasBossId) table.string("boss_id", 40).notNullable().defaultTo("monstroAreia");
             if (!boardHasClosedAt) table.timestamp("closed_at").nullable();
         });
     }
     await knex("guild_boards")
         .where((query) => query.whereNull("boss_id").orWhere("boss_id", ""))
         .update({
-            boss_id: knex.raw("CASE WHEN random() < 0.5 THEN 'bluelobister' ELSE 'cao' END"),
+            boss_id: knex.raw("CASE WHEN random() < 0.5 THEN 'monstroAreia' ELSE 'tempoPerdido' END"),
         });
 
     const taskHasBossDamage = await knex.schema.hasColumn("guild_tasks", "boss_damage");
-    if (!taskHasBossDamage) {
+    const taskHasDueDate = await knex.schema.hasColumn("guild_tasks", "due_date");
+    const taskHasPenaltyDays = await knex.schema.hasColumn("guild_tasks", "penalty_days_applied");
+    if (!taskHasBossDamage || !taskHasDueDate || !taskHasPenaltyDays) {
         await knex.schema.alterTable("guild_tasks", table => {
-            table.integer("boss_damage").notNullable().defaultTo(0);
+            if (!taskHasBossDamage) table.integer("boss_damage").notNullable().defaultTo(0);
+            if (!taskHasDueDate) table.date("due_date").nullable();
+            if (!taskHasPenaltyDays) table.integer("penalty_days_applied").notNullable().defaultTo(0);
         });
     }
 
